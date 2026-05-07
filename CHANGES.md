@@ -38,3 +38,39 @@ AI tool used: Codex
   Reason: invalid parameters should fail early with a clear exception instead of producing undefined algorithm behavior.
 - Kept the existing public usage style, including `CroConfig.builder()`, `optimize()`, `getBestPE()` and the demo class.
   Reason: the correction should preserve the project structure and avoid unnecessary API churn.
+
+## Aufgabe 2 - Analyse und Verbesserung des CRO-Testszenarios
+
+AI tool used: Codex
+
+### Test Problems Found
+
+- The previous tests were mostly flat and did not separate initialization, iteration behavior, reaction dynamics, boundaries and configuration validation.
+- The convergence test used a high-dimensional stochastic run with an absolute threshold, making the assertion less focused on stable CRO behavior.
+- Population behavior was only smoke-tested by checking that `optimize()` did not throw.
+- Initialization was not checked directly; there was no assertion for configured population size or finite initial best energy.
+- Edge cases for infeasible objective functions and non-finite candidate energies were missing.
+- Defensive-copy behavior for result arrays, configuration bounds and objective-function inputs was not covered.
+- Boundary tests only checked the final best from one scenario and did not deliberately stress clamping with a larger step size.
+- Configuration validation missed finite-value cases and invalid intervals such as equal lower and upper bounds.
+
+### Tests Changed or Added
+
+- Reworked the test class into nested JUnit 5 groups: initialization, optimization behavior, CRO reaction dynamics, boundaries/result integrity, invalid fitness handling and configuration validation.
+  Reason: the structure now mirrors the algorithm concerns required by the specification and makes failures easier to interpret.
+- Added initialization tests for configured population size, finite initial best energy and infeasible objective functions.
+  Reason: Aufgabe 2 explicitly asks whether initialization and edge cases are covered.
+- Replaced the brittle convergence check with deterministic one-dimensional sphere improvement plus a moderate final threshold.
+  Reason: this checks real optimizer progress without depending on uncontrolled random luck.
+- Added energy-conservation coverage over a longer deterministic run.
+  Reason: CRO reaction acceptance depends on potential energy, kinetic energy and buffer accounting.
+- Added synthesis-specific population tests.
+  Reason: CRO may change population size through decomposition/synthesis, and synthesis must not reduce the population below two.
+- Added deterministic seed assertions for best solution, best potential energy and final population size.
+  Reason: seeded stochastic algorithms must be reproducible for grading and debugging.
+- Added boundary and defensive-copy tests for returned best positions, configuration bounds and objective evaluation input arrays.
+  Reason: mutable arrays are a common source of hidden state corruption in optimization code.
+- Added invalid-fitness handling tests.
+  Reason: non-finite objective values must not become global bests or corrupt later optimization.
+- Extended configuration validation tests for NaN/infinite parameters and invalid bound intervals.
+  Reason: invalid inputs should fail early and consistently.
