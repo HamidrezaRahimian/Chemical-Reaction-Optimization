@@ -74,3 +74,48 @@ AI tool used: Codex
   Reason: non-finite objective values must not become global bests or corrupt later optimization.
 - Extended configuration validation tests for NaN/infinite parameters and invalid bound intervals.
   Reason: invalid inputs should fail early and consistently.
+
+## Aufgabe 3 - Clean Coding und SOLID-Refactoring
+
+AI tool used: Codex
+
+### Violations Found
+
+- `ChemicalReactionOptimization` used manual array management for `population` (`addMolecule`, `removeMolecule`, capacity checks).
+  Violation: unnecessary complexity and KISS/DRY issue because Java already provides `List`.
+- `ChemicalReactionOptimization.perturb`, `performSynthesis` and `createRandomMolecule` repeatedly called `config.minBounds()` and `config.maxBounds()` inside loops.
+  Violation: duplicated access logic and avoidable defensive-copy churn.
+- `ChemicalReactionOptimization.reactWithTwoMolecules` mixed index selection, reaction eligibility and reaction dispatch in one method.
+  Violation: method responsibility was broader than necessary.
+- `ChemicalReactionOptimization.performDecomposition` duplicated the construction of decomposition products in the direct-energy and buffer-energy branches.
+  Violation: DRY issue and harder-to-read energy flow.
+- `ChemicalReactionOptimization` accessed `Molecule` fields directly in most reaction methods.
+  Violation: weak encapsulation; molecule state rules were spread across the optimizer instead of living behind intention-revealing methods.
+- `ChemicalReactionOptimization.CroConfig` compact constructor contained all validation checks inline.
+  Violation: long method and mixed validation responsibilities.
+- Magic numbers appeared as raw literals, especially the minimum population size and maximum initialization attempts.
+  Violation: unclear intent.
+
+### Refactorings Performed
+
+- Replaced manual molecule array storage with `List<Molecule>`.
+  Reason: simpler population add/remove/set operations, less custom bookkeeping, same CRO behavior.
+- Cached validated `minBounds` and `maxBounds` once in the optimizer constructor.
+  Reason: keeps defensive copies at API boundaries while avoiding repeated cloning in inner loops.
+- Added named constants `MINIMUM_POPULATION_SIZE` and `MAX_INITIALIZATION_ATTEMPTS`.
+  Reason: removes magic numbers and clarifies algorithm constraints.
+- Extracted small helper methods: `shouldUseBimolecularReaction`, `randomDifferentIndex`, `canSynthesize`, `randomStructure`, `hasEnoughEnergy` and `replaceWithDecompositionProducts`.
+  Reason: separates reaction dispatch, random structure creation and energy checks without adding new abstractions.
+- Moved molecule-related queries behind methods such as `totalEnergy`, `isStagnating`, `hasKineticEnergyAtMost`, `bestStructure` and `bestPotentialEnergy`.
+  Reason: improves encapsulation and makes reaction code read in CRO terms.
+- Split `CroConfig` validation into focused private helpers: core settings, probabilities, energy settings and bound intervals.
+  Reason: keeps construction readable while preserving the existing nested `CroConfig.builder()` API.
+
+### Justified Deviations
+
+- `ChemicalReactionOptimization` remains a single public optimizer class with nested `CroConfig`, `ObjectiveFunction`, `Molecule` and demo class.
+  Reason: splitting into many public files would add architecture without a clear grading benefit; the current structure stays compatible with the existing tests and assignment layout.
+- No extra interfaces, factories or abstract base classes were added.
+  Reason: OCP/DIP do not justify additional layers here; the existing `ObjectiveFunction` functional interface is sufficient dependency inversion for the objective function.
+- LSP and ISP have no material violations.
+  Reason: there is no inheritance hierarchy, and the only interface has one required method.

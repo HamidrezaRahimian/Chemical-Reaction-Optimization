@@ -1,6 +1,8 @@
 package edu.swarmintelligence.cro;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.Random;
 
@@ -14,12 +16,16 @@ import java.util.Random;
  * objective values are always considered better.</p>
  */
 public class ChemicalReactionOptimization {
+    private static final int MINIMUM_POPULATION_SIZE = 2;
+    private static final int MAX_INITIALIZATION_ATTEMPTS = 1000;
+
     private final CroConfig config;
     private final ObjectiveFunction function;
     private final Random random;
+    private final double[] minBounds;
+    private final double[] maxBounds;
 
-    private Molecule[] population;
-    private int populationSize;
+    private final List<Molecule> population;
     private double buffer;
     private double[] globalBestStructure;
     private double globalBestPotentialEnergy;
@@ -29,8 +35,9 @@ public class ChemicalReactionOptimization {
         this.config = Objects.requireNonNull(config, "config");
         this.function = Objects.requireNonNull(function, "function");
         this.random = new Random(config.seed());
-        this.population = new Molecule[Math.max(4, config.popSize() * 2)];
-        this.populationSize = 0;
+        this.minBounds = config.minBounds();
+        this.maxBounds = config.maxBounds();
+        this.population = new ArrayList<>(config.popSize());
         this.buffer = config.enBuff();
         this.globalBestPotentialEnergy = Double.POSITIVE_INFINITY;
         initializePopulation();
@@ -38,7 +45,7 @@ public class ChemicalReactionOptimization {
 
     private void initializePopulation() {
         for (int i = 0; i < config.popSize(); i++) {
-            addMolecule(createRandomMolecule(config.initialKE()));
+            population.add(createRandomMolecule(config.initialKE()));
         }
         updateGlobalBest();
         if (globalBestStructure == null) {
@@ -53,7 +60,7 @@ public class ChemicalReactionOptimization {
      */
     public double[] optimize() {
         for (int iteration = 0; iteration < config.maxIterations(); iteration++) {
-            if (populationSize >= 2 && random.nextDouble() < config.moleColl()) {
+            if (shouldUseBimolecularReaction()) {
                 reactWithTwoMolecules();
             } else {
                 reactWithOneMolecule();
@@ -64,9 +71,9 @@ public class ChemicalReactionOptimization {
     }
 
     private void reactWithOneMolecule() {
-        int index = random.nextInt(populationSize);
-        Molecule molecule = population[index];
-        if (molecule.collisionCount - molecule.bestCollisionCount > config.decThres()) {
+        int index = random.nextInt(population.size());
+        Molecule molecule = population.get(index);
+        if (molecule.isStagnating(config.decThres())) {
             performDecomposition(index);
         } else {
             performOnWallCollision(molecule);
@@ -74,23 +81,33 @@ public class ChemicalReactionOptimization {
     }
 
     private void reactWithTwoMolecules() {
-        int firstIndex = random.nextInt(populationSize);
-        int secondIndex = random.nextInt(populationSize - 1);
-        if (secondIndex >= firstIndex) {
-            secondIndex++;
-        }
+        int firstIndex = random.nextInt(population.size());
+        int secondIndex = randomDifferentIndex(firstIndex);
 
-        Molecule first = population[firstIndex];
-        Molecule second = population[secondIndex];
-        boolean synthesisAllowed = populationSize > 2
-                && first.kineticEnergy <= config.synThres()
-                && second.kineticEnergy <= config.synThres();
+        Molecule first = population.get(firstIndex);
+        Molecule second = population.get(secondIndex);
 
-        if (synthesisAllowed) {
+        if (canSynthesize(first, second)) {
             performSynthesis(firstIndex, secondIndex);
         } else {
             performInterMolecularCollision(first, second);
         }
+    }
+
+    private boolean shouldUseBimolecularReaction() {
+        return population.size() >= MINIMUM_POPULATION_SIZE
+                && random.nextDouble() < config.moleColl();
+    }
+
+    private int randomDifferentIndex(final int firstIndex) {
+        int secondIndex = random.nextInt(population.size() - 1);
+        return secondIndex >= firstIndex ? secondIndex + 1 : secondIndex;
+    }
+
+    private boolean canSynthesize(final Molecule first, final Molecule second) {
+        return population.size() > MINIMUM_POPULATION_SIZE
+                && first.hasKineticEnergyAtMost(config.synThres())
+                && second.hasKineticEnergyAtMost(config.synThres());
     }
 
     /**
@@ -99,7 +116,7 @@ public class ChemicalReactionOptimization {
      * kinetic energy and the rest is stored in the central buffer.
      */
     private void performOnWallCollision(final Molecule molecule) {
-        double[] candidateStructure = perturb(molecule.structure);
+        double[] candidateStructure = perturb(molecule.structure());
         double candidatePotentialEnergy = evaluate(candidateStructure);
 
         if (!Double.isFinite(candidatePotentialEnergy)) {
@@ -107,8 +124,8 @@ public class ChemicalReactionOptimization {
             return;
         }
 
-        double availableEnergy = molecule.potentialEnergy + molecule.kineticEnergy;
-        if (candidatePotentialEnergy <= availableEnergy) {
+        double availableEnergy = molecule.totalEnergy();
+        if (hasEnoughEnergy(availableEnergy, candidatePotentialEnergy)) {
             double surplus = availableEnergy - candidatePotentialEnergy;
             double kineticRatio = config.kelossRate()
                     + random.nextDouble() * (1.0 - config.kelossRate());
@@ -125,9 +142,9 @@ public class ChemicalReactionOptimization {
      * missing from the source molecule may be borrowed from the central buffer.
      */
     private void performDecomposition(final int index) {
-        Molecule source = population[index];
-        double[] firstStructure = perturb(source.minStructure);
-        double[] secondStructure = perturb(source.structure);
+        Molecule source = population.get(index);
+        double[] firstStructure = perturb(source.bestStructure());
+        double[] secondStructure = perturb(source.structure());
         double firstPotentialEnergy = evaluate(firstStructure);
         double secondPotentialEnergy = evaluate(secondStructure);
 
@@ -136,24 +153,35 @@ public class ChemicalReactionOptimization {
             return;
         }
 
-        double availableEnergy = source.potentialEnergy + source.kineticEnergy;
+        double availableEnergy = source.totalEnergy();
         double requiredPotentialEnergy = firstPotentialEnergy + secondPotentialEnergy;
-        if (requiredPotentialEnergy <= availableEnergy) {
-            double surplus = availableEnergy - requiredPotentialEnergy;
-            double firstKineticEnergy = random.nextDouble() * surplus;
-            population[index] = new Molecule(firstStructure, firstPotentialEnergy, firstKineticEnergy);
-            addMolecule(new Molecule(secondStructure, secondPotentialEnergy,
-                    surplus - firstKineticEnergy));
-        } else {
-            double deficit = requiredPotentialEnergy - availableEnergy;
-            if (buffer >= deficit) {
-                buffer -= deficit;
-                population[index] = new Molecule(firstStructure, firstPotentialEnergy, 0.0);
-                addMolecule(new Molecule(secondStructure, secondPotentialEnergy, 0.0));
-            } else {
-                source.registerCollision();
-            }
+        if (hasEnoughEnergy(availableEnergy, requiredPotentialEnergy)) {
+            replaceWithDecompositionProducts(index, firstStructure, firstPotentialEnergy,
+                    secondStructure, secondPotentialEnergy,
+                    availableEnergy - requiredPotentialEnergy);
+            return;
         }
+
+        double deficit = requiredPotentialEnergy - availableEnergy;
+        if (buffer >= deficit) {
+            buffer -= deficit;
+            replaceWithDecompositionProducts(index, firstStructure, firstPotentialEnergy,
+                    secondStructure, secondPotentialEnergy, 0.0);
+        } else {
+            source.registerCollision();
+        }
+    }
+
+    private void replaceWithDecompositionProducts(final int index,
+                                                  final double[] firstStructure,
+                                                  final double firstPotentialEnergy,
+                                                  final double[] secondStructure,
+                                                  final double secondPotentialEnergy,
+                                                  final double surplusEnergy) {
+        double firstKineticEnergy = random.nextDouble() * surplusEnergy;
+        population.set(index, new Molecule(firstStructure, firstPotentialEnergy, firstKineticEnergy));
+        population.add(new Molecule(secondStructure, secondPotentialEnergy,
+                surplusEnergy - firstKineticEnergy));
     }
 
     /**
@@ -163,8 +191,8 @@ public class ChemicalReactionOptimization {
      */
     private void performInterMolecularCollision(final Molecule first,
                                                 final Molecule second) {
-        double[] firstStructure = perturb(first.structure);
-        double[] secondStructure = perturb(second.structure);
+        double[] firstStructure = perturb(first.structure());
+        double[] secondStructure = perturb(second.structure());
         double firstPotentialEnergy = evaluate(firstStructure);
         double secondPotentialEnergy = evaluate(secondStructure);
 
@@ -174,10 +202,9 @@ public class ChemicalReactionOptimization {
             return;
         }
 
-        double availableEnergy = first.potentialEnergy + first.kineticEnergy
-                + second.potentialEnergy + second.kineticEnergy;
+        double availableEnergy = first.totalEnergy() + second.totalEnergy();
         double requiredPotentialEnergy = firstPotentialEnergy + secondPotentialEnergy;
-        if (requiredPotentialEnergy <= availableEnergy) {
+        if (hasEnoughEnergy(availableEnergy, requiredPotentialEnergy)) {
             double surplus = availableEnergy - requiredPotentialEnergy;
             double firstKineticEnergy = random.nextDouble() * surplus;
             first.replaceState(firstStructure, firstPotentialEnergy, firstKineticEnergy);
@@ -194,15 +221,15 @@ public class ChemicalReactionOptimization {
      * reaction is skipped when it would shrink the population below two.
      */
     private void performSynthesis(final int firstIndex, final int secondIndex) {
-        Molecule first = population[firstIndex];
-        Molecule second = population[secondIndex];
+        Molecule first = population.get(firstIndex);
+        Molecule second = population.get(secondIndex);
         double[] candidateStructure = new double[config.dimensions()];
         for (int d = 0; d < candidateStructure.length; d++) {
             double ratio = random.nextDouble();
             candidateStructure[d] = clamp(
-                    first.structure[d] + ratio * (second.structure[d] - first.structure[d]),
-                    config.minBounds()[d],
-                    config.maxBounds()[d]);
+                    first.coordinate(d) + ratio * (second.coordinate(d) - first.coordinate(d)),
+                    minBounds[d],
+                    maxBounds[d]);
         }
 
         double candidatePotentialEnergy = evaluate(candidateStructure);
@@ -212,14 +239,13 @@ public class ChemicalReactionOptimization {
             return;
         }
 
-        double availableEnergy = first.potentialEnergy + first.kineticEnergy
-                + second.potentialEnergy + second.kineticEnergy;
-        if (candidatePotentialEnergy <= availableEnergy) {
+        double availableEnergy = first.totalEnergy() + second.totalEnergy();
+        if (hasEnoughEnergy(availableEnergy, candidatePotentialEnergy)) {
             int highIndex = Math.max(firstIndex, secondIndex);
             int lowIndex = Math.min(firstIndex, secondIndex);
-            removeMolecule(highIndex);
-            population[lowIndex] = new Molecule(candidateStructure, candidatePotentialEnergy,
-                    availableEnergy - candidatePotentialEnergy);
+            population.remove(highIndex);
+            population.set(lowIndex, new Molecule(candidateStructure, candidatePotentialEnergy,
+                    availableEnergy - candidatePotentialEnergy));
         } else {
             first.registerCollision();
             second.registerCollision();
@@ -230,55 +256,47 @@ public class ChemicalReactionOptimization {
         double[] result = new double[config.dimensions()];
         for (int d = 0; d < result.length; d++) {
             result[d] = clamp(structure[d] + random.nextGaussian() * config.stepSize(),
-                    config.minBounds()[d], config.maxBounds()[d]);
+                    minBounds[d], maxBounds[d]);
         }
         return result;
     }
 
     private Molecule createRandomMolecule(final double kineticEnergy) {
-        final int maxAttempts = 1000;
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            double[] structure = new double[config.dimensions()];
-            for (int d = 0; d < structure.length; d++) {
-                double min = config.minBounds()[d];
-                double max = config.maxBounds()[d];
-                structure[d] = min + random.nextDouble() * (max - min);
-            }
+        for (int attempt = 0; attempt < MAX_INITIALIZATION_ATTEMPTS; attempt++) {
+            double[] structure = randomStructure();
             double potentialEnergy = evaluate(structure);
             if (Double.isFinite(potentialEnergy)) {
                 return new Molecule(structure, potentialEnergy, kineticEnergy);
             }
         }
-        throw new IllegalStateException("No feasible molecule found after 1000 attempts.");
+        throw new IllegalStateException("No feasible molecule found after "
+                + MAX_INITIALIZATION_ATTEMPTS + " attempts.");
+    }
+
+    private double[] randomStructure() {
+        double[] structure = new double[config.dimensions()];
+        for (int d = 0; d < structure.length; d++) {
+            structure[d] = minBounds[d] + random.nextDouble() * (maxBounds[d] - minBounds[d]);
+        }
+        return structure;
     }
 
     private double evaluate(final double[] structure) {
         return function.evaluate(structure.clone());
     }
 
+    private static boolean hasEnoughEnergy(final double availableEnergy,
+                                           final double requiredPotentialEnergy) {
+        return requiredPotentialEnergy <= availableEnergy;
+    }
+
     private void updateGlobalBest() {
-        for (int i = 0; i < populationSize; i++) {
-            Molecule molecule = population[i];
-            if (molecule.minPotentialEnergy < globalBestPotentialEnergy) {
-                globalBestPotentialEnergy = molecule.minPotentialEnergy;
-                globalBestStructure = molecule.minStructure.clone();
+        for (Molecule molecule : population) {
+            if (molecule.bestPotentialEnergy() < globalBestPotentialEnergy) {
+                globalBestPotentialEnergy = molecule.bestPotentialEnergy();
+                globalBestStructure = molecule.bestStructure();
             }
         }
-    }
-
-    private void addMolecule(final Molecule molecule) {
-        if (populationSize == population.length) {
-            population = Arrays.copyOf(population, population.length * 2);
-        }
-        population[populationSize++] = molecule;
-    }
-
-    private void removeMolecule(final int index) {
-        int moved = populationSize - index - 1;
-        if (moved > 0) {
-            System.arraycopy(population, index + 1, population, index, moved);
-        }
-        population[--populationSize] = null;
     }
 
     private static double clamp(final double value, final double min, final double max) {
@@ -287,8 +305,8 @@ public class ChemicalReactionOptimization {
 
     public double getTotalSystemEnergy() {
         double total = buffer;
-        for (int i = 0; i < populationSize; i++) {
-            total += population[i].potentialEnergy + population[i].kineticEnergy;
+        for (Molecule molecule : population) {
+            total += molecule.totalEnergy();
         }
         return total;
     }
@@ -298,7 +316,7 @@ public class ChemicalReactionOptimization {
     }
 
     int getPopulationSize() {
-        return populationSize;
+        return population.size();
     }
 
     @FunctionalInterface
@@ -328,46 +346,14 @@ public class ChemicalReactionOptimization {
         public CroConfig {
             Objects.requireNonNull(minBounds, "minBounds");
             Objects.requireNonNull(maxBounds, "maxBounds");
-            if (popSize < 2) {
-                throw new IllegalArgumentException("PopSize must be >= 2");
-            }
-            if (maxIterations <= 0) {
-                throw new IllegalArgumentException("MaxIterations must be > 0");
-            }
-            if (dimensions <= 0) {
-                throw new IllegalArgumentException("Dimensions must be > 0");
-            }
-            if (minBounds.length != dimensions || maxBounds.length != dimensions) {
-                throw new IllegalArgumentException("Bounds length must match dimensions");
-            }
+            validateCoreSettings(popSize, maxIterations, dimensions, minBounds, maxBounds);
             validateFiniteProbability(kelossRate, "kelossRate");
             validateFiniteProbability(moleColl, "moleColl");
-            if (decThres <= 0) {
-                throw new IllegalArgumentException("decThres must be > 0");
-            }
-            if (!Double.isFinite(synThres) || synThres < 0.0) {
-                throw new IllegalArgumentException("synThres must be finite and >= 0");
-            }
-            if (!Double.isFinite(initialKE) || initialKE <= 0.0) {
-                throw new IllegalArgumentException("initialKE must be finite and > 0");
-            }
-            if (!Double.isFinite(enBuff) || enBuff < 0.0) {
-                throw new IllegalArgumentException("enBuff must be finite and >= 0");
-            }
-            if (!Double.isFinite(stepSize) || stepSize <= 0.0) {
-                throw new IllegalArgumentException("stepSize must be finite and > 0");
-            }
+            validateEnergySettings(decThres, synThres, initialKE, enBuff, stepSize);
 
             minBounds = minBounds.clone();
             maxBounds = maxBounds.clone();
-            for (int d = 0; d < dimensions; d++) {
-                if (!Double.isFinite(minBounds[d]) || !Double.isFinite(maxBounds[d])) {
-                    throw new IllegalArgumentException("Bounds must be finite");
-                }
-                if (minBounds[d] >= maxBounds[d]) {
-                    throw new IllegalArgumentException("Each min bound must be smaller than max bound");
-                }
-            }
+            validateBoundIntervals(minBounds, maxBounds);
         }
 
         public double[] minBounds() {
@@ -385,6 +371,65 @@ public class ChemicalReactionOptimization {
         private static void validateFiniteProbability(final double value, final String name) {
             if (!Double.isFinite(value) || value < 0.0 || value > 1.0) {
                 throw new IllegalArgumentException(name + " must be finite and in [0, 1]");
+            }
+        }
+
+        private static void validateCoreSettings(final int popSize,
+                                                 final int maxIterations,
+                                                 final int dimensions,
+                                                 final double[] minBounds,
+                                                 final double[] maxBounds) {
+            if (popSize < MINIMUM_POPULATION_SIZE) {
+                throw new IllegalArgumentException("PopSize must be >= " + MINIMUM_POPULATION_SIZE);
+            }
+            if (maxIterations <= 0) {
+                throw new IllegalArgumentException("MaxIterations must be > 0");
+            }
+            if (dimensions <= 0) {
+                throw new IllegalArgumentException("Dimensions must be > 0");
+            }
+            if (minBounds.length != dimensions || maxBounds.length != dimensions) {
+                throw new IllegalArgumentException("Bounds length must match dimensions");
+            }
+        }
+
+        private static void validateEnergySettings(final int decThres,
+                                                   final double synThres,
+                                                   final double initialKE,
+                                                   final double enBuff,
+                                                   final double stepSize) {
+            if (decThres <= 0) {
+                throw new IllegalArgumentException("decThres must be > 0");
+            }
+            validateFiniteNonNegative(synThres, "synThres");
+            validateFinitePositive(initialKE, "initialKE");
+            validateFiniteNonNegative(enBuff, "enBuff");
+            validateFinitePositive(stepSize, "stepSize");
+        }
+
+        private static void validateFiniteNonNegative(final double value,
+                                                      final String name) {
+            if (!Double.isFinite(value) || value < 0.0) {
+                throw new IllegalArgumentException(name + " must be finite and >= 0");
+            }
+        }
+
+        private static void validateFinitePositive(final double value,
+                                                   final String name) {
+            if (!Double.isFinite(value) || value <= 0.0) {
+                throw new IllegalArgumentException(name + " must be finite and > 0");
+            }
+        }
+
+        private static void validateBoundIntervals(final double[] minBounds,
+                                                   final double[] maxBounds) {
+            for (int d = 0; d < minBounds.length; d++) {
+                if (!Double.isFinite(minBounds[d]) || !Double.isFinite(maxBounds[d])) {
+                    throw new IllegalArgumentException("Bounds must be finite");
+                }
+                if (minBounds[d] >= maxBounds[d]) {
+                    throw new IllegalArgumentException("Each min bound must be smaller than max bound");
+                }
             }
         }
 
@@ -513,6 +558,34 @@ public class ChemicalReactionOptimization {
                 minStructure = structure.clone();
                 bestCollisionCount = collisionCount;
             }
+        }
+
+        double[] structure() {
+            return structure.clone();
+        }
+
+        double coordinate(final int dimension) {
+            return structure[dimension];
+        }
+
+        double totalEnergy() {
+            return potentialEnergy + kineticEnergy;
+        }
+
+        boolean hasKineticEnergyAtMost(final double threshold) {
+            return kineticEnergy <= threshold;
+        }
+
+        boolean isStagnating(final int decompositionThreshold) {
+            return collisionCount - bestCollisionCount > decompositionThreshold;
+        }
+
+        double[] bestStructure() {
+            return minStructure.clone();
+        }
+
+        double bestPotentialEnergy() {
+            return minPotentialEnergy;
         }
     }
 
