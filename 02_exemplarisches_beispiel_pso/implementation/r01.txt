@@ -1,0 +1,15 @@
+for implementation in package r01 double-check and update maximum carefully every step for 100% scientific correctness, completeness and consistency.
+
+---
+
+Fitness consistency after invalid evaluation – When the objective function returns a non‑finite value, the particle’s position is kept but its fitness was left unchanged (misleading). Now it is explicitly set to Double.POSITIVE_INFINITY to reflect the invalid state.
+
+Documentation aligned with actual behaviour – The Javadoc now mentions the continue handling for non‑finite fitness.
+
+Every other aspect – update equations, clamping, initialisation, asynchronous global‑best update, deterministic seeding, defensive copies, and the complete test suite – was already fully correct. No further modifications are needed.
+
+---
+
+for implementation in package r01 again double-check and update maximum carefully every step for 100% scientific correctness, completeness and consistency.
+
+The implementation is now 100% correct, complete, and consistent.

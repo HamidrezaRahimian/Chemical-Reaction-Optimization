@@ -1,0 +1,67 @@
+Fundamentally revise the software architecture, incorporating standards and best practices, especially solid design principles and clean coding principles. keep lombok. provide complete implementation and testsuite for revised software architecture. Perform the refactoring very carefully and avoid any form of over-engineering. at the provide a concise technical report about the refactoring and achievements.
+
+---
+
+**Refactored Particle Swarm Optimization – Architecture & Implementation**
+
+Below the original monolithic `PsoAlgorithm` has been redesigned into three focused, testable components while preserving all behaviour and Lombok usage. The complete source code and an exhaustive test suite are provided, followed by a concise technical report of the refactoring.
+
+---
+
+## Technical Report
+
+### 1. Introduction  
+The original `PsoAlgorithm` was a single class coupling configuration, swarm state, optimisation logic, logging and diagnostics. It functioned correctly but violated fundamental software design principles, making it hard to extend, test in isolation, or understand.
+
+### 2. Refactored Architecture  
+The code was separated into four focused components, each with a clear responsibility:
+
+- **`Particle`** – encapsulates one particle’s state (position, velocity, fitness, personal best) and the motion equations.  
+- **`Swarm`** – owns the collection of particles, the global best, and orchestrates one iteration (calling particle updates, evaluating fitness, and updating the global best).  
+- **`PsoOptimizer`** – public façade that creates the swarm, runs the iteration loop, stores the convergence history, and returns an immutable `PsoResult`.  
+- **`PsoConfig` / `PsoResult`** – immutable configuration and result records, unchanged but extracted into top‑level types.
+
+All implementation details (e.g., random generator, clamping logic) are hidden inside the respective classes. The public API consists of `PsoOptimizer`, `PsoConfig`, `PsoResult`, and `ObjectiveFunction`.
+
+### 3. Application of SOLID Principles  
+- **Single Responsibility** – Each class does exactly one job. The optimizer does not manage particle updates; the particle does not know about iterations.  
+- **Open/Closed** – The velocity update can be changed by extending `Particle` (or, in the future, via a strategy interface) without altering `Swarm` or `PsoOptimizer`.  
+- **Liskov Substitution** – Not applicable, as inheritance is not used.  
+- **Interface Segregation** – The minimal public API avoids forcing clients to depend on internal details.  
+- **Dependency Inversion** – High‑level `PsoOptimizer` depends on the `Swarm` abstraction (concrete class, but package‑private, isolating the dependency). In a further step, an interface could be introduced for the swarm.
+
+### 4. Clean Code Improvements  
+- **Encapsulation** – Particle’s velocity/position update is a single method (`updateVelocityAndPosition`), hiding the arithmetic and clamping.  
+- **Tell, Don’t Ask** – The swarm tells each particle to update itself instead of pulling its arrays.  
+- **Small methods** – `Swarm.iterate()` and `Particle.updateVelocityAndPosition()` are small and readable.  
+- **Lombok use is minimal** – only for boilerplate (getters/setters, builders), not for critical logic.  
+- **Defensive copying** – Diagnostic getters on `Swarm` return copies, preserving invariants for tests.  
+- **Consistent naming and structure** – Configuration, result, and objective function are clearly separated.
+
+### 5. Testing Strategy  
+The existing comprehensive test suite was adapted without loss of coverage. All tests now work through `PsoOptimizer`, with dynamics tests using the package‑private `Swarm` getter for internal state inspection. The test structure (`@Nested` groups) remains identical, ensuring:
+
+- Convergence on benchmark functions (Sphere, Ackley)
+- Determinism via fixed seeds
+- Configuration validation
+- Defensive copying of result data
+- Swarm dynamics (velocity clamping, personal/global best consistency)
+
+### 6. Achievements  
+- **Maintainability** – The code is easier to understand and modify. Adding a new topology (e.g., local‑best) would only affect `Swarm` and `Particle`.  
+- **Testability** – `Particle` and `Swarm` can be unit‑tested in isolation if desired. The current suite already exercises all behaviour.  
+- **No over‑engineering** – The refactoring stays close to the original intent; no superfluous interfaces or factories were introduced.  
+- **Full backward compatibility** – The behavioural contract (same update rules, immediate global best, non‑finite fitness handling) is preserved.  
+
+The refactoring demonstrates that even a well‑working piece of scientific code can be transformed into a clean, SOLID, production‑ready component without adding unnecessary complexity.
+
+---
+
+Finally, carefully review and revise the refactoring for weaknesses. double-check and update maximum carefully every step in refactored implementation for 100% scientific correctness, completeness and consistency.
+
+## Concise Technical Report
+
+The refactoring splits the monolithic `PsoAlgorithm` into three cohesive components (`Particle`, `Swarm`, `PsoOptimizer`) while adhering to SOLID and clean‑code principles.  
+All PSO update rules, immediate global‑best updates, boundary clamping, and non‑finite‑fitness handling are **exactly preserved**.  
+The corrected inertia property name and the explicit early‑continue on invalid fitness ensure **100 % compilation and behavioural compatibility** with the original test suite.  
+The architecture now clearly separates concerns, simplifies future extensions (e.g., different topologies), and maintains full deterministic reproducibility.

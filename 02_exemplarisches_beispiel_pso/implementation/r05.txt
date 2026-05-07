@@ -1,0 +1,3 @@
+for implementation in package r04 create a powerful data analytics engine based on the log file for a professional evaluation of the algorithm's quality focused on PSO. The result is a professionally formatted and comprehensible report, which is displayed on the screen. avoid using icons and symbols for reports, use only ascii.
+
+final double-check and update very carefully data analytics engine for 100% correctness, completeness and consistency.

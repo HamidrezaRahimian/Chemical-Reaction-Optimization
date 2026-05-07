@@ -1,0 +1,1 @@
+The comprehensive test suite for implementation in package r02 must ensure 100% scientific correctness of the algorithm and its behavior. Carefully review and update the test suite to ensure this crucial requirement is met. use modern features/best practices from junit5 and assertj.

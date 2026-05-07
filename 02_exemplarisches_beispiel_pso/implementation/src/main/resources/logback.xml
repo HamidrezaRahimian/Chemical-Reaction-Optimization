@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- ============================================================
+         Console appender – prints to System.out with timestamps and
+         thread‑safe, human‑readable format.
+         ============================================================ -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="edu.swarmintelligence.abc" level="INFO"/>
+
+    <!-- ============================================================
+         Root logger – catches everything else (e.g., library noise).
+         Set to WARN to keep the output clean.
+         ============================================================ -->
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
