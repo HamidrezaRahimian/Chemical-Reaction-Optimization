@@ -69,6 +69,10 @@ class ChemicalReactionOptimizationTest {
     @Nested
     @DisplayName("Initialization")
     class Initialization {
+        /**
+         * Verifies that CRO starts with the requested number of feasible
+         * molecules and has a finite global best before any reaction is run.
+         */
         @Test
         @DisplayName("Initializes the configured molecule population with finite best energy")
         void initializesPopulationAndBestEnergy() {
@@ -95,6 +99,11 @@ class ChemicalReactionOptimizationTest {
     @Nested
     @DisplayName("Optimization behavior")
     class OptimizationBehavior {
+        /**
+         * Protects the minimization contract: the population may accept worse
+         * current molecule states, but the remembered global best must never
+         * degrade.
+         */
         @Test
         @DisplayName("Best energy never worsens during optimization")
         void globalBestNeverWorsens() {
@@ -108,6 +117,11 @@ class ChemicalReactionOptimizationTest {
             assertThat(sphere(best)).isEqualTo(cro.getBestPE());
         }
 
+        /**
+         * Uses a simple deterministic sphere problem to check that the CRO
+         * reaction loop can improve a population without relying on a fragile
+         * high-dimensional convergence threshold.
+         */
         @Test
         @DisplayName("Converges to a lower value on a simple 1-D sphere problem")
         void improvesOnSimpleSphereProblem() {
@@ -121,6 +135,11 @@ class ChemicalReactionOptimizationTest {
             assertThat(cro.getBestPE()).isLessThan(0.1);
         }
 
+        /**
+         * Checks CRO's energy accounting across all reaction types: accepted
+         * reactions redistribute potential, kinetic and buffer energy, while
+         * rejected reactions leave total energy unchanged.
+         */
         @Test
         @DisplayName("Preserves total CRO energy across accepted and rejected reactions")
         void conservesTotalEnergy() {
@@ -156,6 +175,11 @@ class ChemicalReactionOptimizationTest {
     @Nested
     @DisplayName("CRO reaction dynamics")
     class ReactionDynamics {
+        /**
+         * Exercises synthesis under conditions where it is always eligible and
+         * confirms that population reduction stops at the algorithm's minimum
+         * viable population size.
+         */
         @Test
         @DisplayName("Synthesis may shrink the population but never below two molecules")
         void synthesisNeverDropsBelowTwoMolecules() {
@@ -211,6 +235,10 @@ class ChemicalReactionOptimizationTest {
     @Nested
     @DisplayName("Boundaries and result integrity")
     class BoundariesAndResultIntegrity {
+        /**
+         * Runs with a large perturbation step to ensure boundary clamping keeps
+         * reported best positions inside the configured search domain.
+         */
         @Test
         @DisplayName("Best position remains within configured bounds")
         void bestPositionStaysInsideBounds() {
@@ -244,6 +272,11 @@ class ChemicalReactionOptimizationTest {
             assertThat(secondBest[0]).isBetween(-2.0, 2.0);
         }
 
+        /**
+         * Confirms that objective functions receive defensive copies of
+         * candidate structures, preventing accidental mutation of internal
+         * molecule state during fitness evaluation.
+         */
         @Test
         @DisplayName("Objective evaluation cannot mutate internal molecule structures")
         void objectiveReceivesDefensiveCopy() {
@@ -266,6 +299,10 @@ class ChemicalReactionOptimizationTest {
     @Nested
     @DisplayName("Invalid fitness handling")
     class InvalidFitnessHandling {
+        /**
+         * Ensures non-finite candidate energies are rejected rather than being
+         * recorded as molecule personal bests or the population global best.
+         */
         @Test
         @DisplayName("Skips non-finite candidate energies without corrupting the best result")
         void nonFiniteCandidatesDoNotBecomeBest() {
@@ -402,6 +439,10 @@ class ChemicalReactionOptimizationTest {
         @TempDir
         Path tempDir;
 
+        /**
+         * Documents the benchmark assumption used by Aufgabe 4: the Ackley
+         * function has its global minimum at the origin with value zero.
+         */
         @Test
         @DisplayName("Ackley 2-D has the specified global minimum at the origin")
         void ackleyMinimumAtOrigin() {
@@ -413,6 +454,13 @@ class ChemicalReactionOptimizationTest {
             assertThat(AckleyFunction.UPPER_BOUND).isEqualTo(32.768);
         }
 
+        /**
+         * Verifies the machine-readable logging contract required by the
+         * specification, including the exact CSV columns and distance-to-optimum
+         * field.
+         *
+         * @throws IOException if the temporary log file cannot be read
+         */
         @Test
         @DisplayName("Writes required CSV columns when logging is enabled")
         void writesCsvLogWhenEnabled() throws IOException {
@@ -449,6 +497,10 @@ class ChemicalReactionOptimizationTest {
             assertThat(Double.parseDouble(firstDataLine[10])).isGreaterThanOrEqualTo(0.0);
         }
 
+        /**
+         * Confirms productive runs do not create log files unless logging is
+         * explicitly enabled in the CRO configuration.
+         */
         @Test
         @DisplayName("Does not create a log file when logging is disabled")
         void loggingCanBeDisabled() {

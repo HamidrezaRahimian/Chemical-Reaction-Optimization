@@ -156,3 +156,25 @@ AI tool used: Codex
 
 - `chemical_reaction_optimization/algorithm_run.log` was generated from `ChemicalReactionOptimization.AckleyLoggingExample`.
 - The sample log contains the required CSV columns and records molecule ID, before/after position, personal best, global best, population average fitness, population standard deviation, and distance to `{0.0, 0.0}`.
+
+## Aufgabe 5 - JavaDoc-Kommentierung
+
+AI tool used: Codex
+
+### Files and Classes Documented
+
+- `ChemicalReactionOptimization.java`
+  - Added JavaDoc for the constructor, initialization, optimization loop, CRO core reaction operators, decomposition product handling, perturbation, feasible molecule creation, objective evaluation, global-best update, logging snapshots, convergence statistics, distance-to-optimum calculation, `ObjectiveFunction`, `CroConfig`, molecule state transitions, and the Ackley logging example.
+- `AlgorithmLogger.java`
+  - Added JavaDoc for the logger purpose, file opening, CSV row writing, flushing, closing, and the `LogEntry` record fields.
+- `AckleyFunction.java`
+  - Added JavaDoc for the benchmark role, standard parameters, required bounds, global minimum, evaluation result, and invalid dimensionality exception.
+- `ChemicalReactionOptimizationTest.java`
+  - Added JavaDoc to the tests that document important algorithmic guarantees: initialization, monotonic global best memory, deterministic improvement, energy conservation, synthesis population behavior, boundary clamping, defensive objective evaluation, invalid-fitness rejection, Ackley minimum, CSV logging, and disabled logging.
+
+### Review Confirmation
+
+- Comments were reviewed against the final refactored code and CRO behavior.
+- Trivial getters, simple builder setters and obvious assertions were intentionally not commented.
+- JavaDoc uses `@param`, `@return`, and `@throws` where they add concrete information.
+- The comments explain CRO-specific behavior instead of copying PSO terminology or generic descriptions.
