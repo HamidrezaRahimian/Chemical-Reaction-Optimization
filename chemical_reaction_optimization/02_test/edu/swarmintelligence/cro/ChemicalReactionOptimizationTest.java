@@ -3,8 +3,14 @@ package edu.swarmintelligence.cro;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.DoubleStream;
 
@@ -387,6 +393,88 @@ class ChemicalReactionOptimizationTest {
 
             assertThat(config.minBounds()).containsExactly(-1.0);
             assertThat(config.maxBounds()).containsExactly(1.0);
+        }
+    }
+
+    @Nested
+    @DisplayName("Ackley logging")
+    class AckleyLogging {
+        @TempDir
+        Path tempDir;
+
+        @Test
+        @DisplayName("Ackley 2-D has the specified global minimum at the origin")
+        void ackleyMinimumAtOrigin() {
+            var ackley = new AckleyFunction();
+
+            assertThat(ackley.evaluate(new double[]{0.0, 0.0}))
+                    .isCloseTo(0.0, offset(1e-12));
+            assertThat(AckleyFunction.LOWER_BOUND).isEqualTo(-32.768);
+            assertThat(AckleyFunction.UPPER_BOUND).isEqualTo(32.768);
+        }
+
+        @Test
+        @DisplayName("Writes required CSV columns when logging is enabled")
+        void writesCsvLogWhenEnabled() throws IOException {
+            Path logFile = tempDir.resolve("algorithm_run.log");
+            var config = ChemicalReactionOptimization.CroConfig.builder()
+                    .popSize(4)
+                    .maxIterations(3)
+                    .dimensions(2)
+                    .minBounds(new double[]{AckleyFunction.LOWER_BOUND, AckleyFunction.LOWER_BOUND})
+                    .maxBounds(new double[]{AckleyFunction.UPPER_BOUND, AckleyFunction.UPPER_BOUND})
+                    .kelossRate(0.2)
+                    .moleColl(0.2)
+                    .decThres(2)
+                    .synThres(1.0)
+                    .initialKE(20.0)
+                    .enBuff(20.0)
+                    .stepSize(0.3)
+                    .seed(20260507L)
+                    .loggingEnabled(true)
+                    .logPath(logFile.toString())
+                    .knownOptimum(new double[]{0.0, 0.0})
+                    .build();
+
+            new ChemicalReactionOptimization(config, new AckleyFunction()).optimize();
+
+            assertThat(logFile).exists().isRegularFile();
+            List<String> lines = Files.readAllLines(logFile, StandardCharsets.UTF_8);
+            assertThat(lines).isNotEmpty();
+            assertThat(lines.getFirst()).isEqualTo(
+                    "iteration;agentId;positionBefore;positionAfter;personalBest;personalBestFitness;"
+                            + "globalBest;globalBestFitness;popAvgFitness;popStdDev;distToOptimum");
+            String[] firstDataLine = lines.get(1).split(";");
+            assertThat(firstDataLine).hasSize(11);
+            assertThat(Double.parseDouble(firstDataLine[10])).isGreaterThanOrEqualTo(0.0);
+        }
+
+        @Test
+        @DisplayName("Does not create a log file when logging is disabled")
+        void loggingCanBeDisabled() {
+            Path logFile = tempDir.resolve("disabled.log");
+            var config = oneDimensionalConfig(21L);
+            config = ChemicalReactionOptimization.CroConfig.builder()
+                    .popSize(config.popSize())
+                    .maxIterations(config.maxIterations())
+                    .dimensions(config.dimensions())
+                    .minBounds(config.minBounds())
+                    .maxBounds(config.maxBounds())
+                    .kelossRate(config.kelossRate())
+                    .moleColl(config.moleColl())
+                    .decThres(config.decThres())
+                    .synThres(config.synThres())
+                    .initialKE(config.initialKE())
+                    .enBuff(config.enBuff())
+                    .stepSize(config.stepSize())
+                    .seed(config.seed())
+                    .loggingEnabled(false)
+                    .logPath(logFile.toString())
+                    .build();
+
+            new ChemicalReactionOptimization(config, ChemicalReactionOptimizationTest::sphere).optimize();
+
+            assertThat(logFile).doesNotExist();
         }
     }
 

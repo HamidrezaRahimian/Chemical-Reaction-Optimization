@@ -1,8 +1,11 @@
 package edu.swarmintelligence.cro;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
 
@@ -24,8 +27,11 @@ public class ChemicalReactionOptimization {
     private final Random random;
     private final double[] minBounds;
     private final double[] maxBounds;
+    private final double[] knownOptimum;
+    private final AlgorithmLogger logger;
 
     private final List<Molecule> population;
+    private long nextMoleculeId;
     private double buffer;
     private double[] globalBestStructure;
     private double globalBestPotentialEnergy;
@@ -37,7 +43,12 @@ public class ChemicalReactionOptimization {
         this.random = new Random(config.seed());
         this.minBounds = config.minBounds();
         this.maxBounds = config.maxBounds();
+        this.knownOptimum = config.knownOptimum();
+        this.logger = config.loggingEnabled()
+                ? AlgorithmLogger.open(Path.of(config.logPath()))
+                : AlgorithmLogger.disabled();
         this.population = new ArrayList<>(config.popSize());
+        this.nextMoleculeId = 0L;
         this.buffer = config.enBuff();
         this.globalBestPotentialEnergy = Double.POSITIVE_INFINITY;
         initializePopulation();
@@ -51,6 +62,7 @@ public class ChemicalReactionOptimization {
         if (globalBestStructure == null) {
             throw new IllegalStateException("No feasible initial molecule found.");
         }
+        writeLogEntries(0, snapshotPositions());
     }
 
     /**
@@ -59,13 +71,19 @@ public class ChemicalReactionOptimization {
      * caller without affecting the optimizer state.
      */
     public double[] optimize() {
-        for (int iteration = 0; iteration < config.maxIterations(); iteration++) {
-            if (shouldUseBimolecularReaction()) {
-                reactWithTwoMolecules();
-            } else {
-                reactWithOneMolecule();
+        try {
+            for (int iteration = 1; iteration <= config.maxIterations(); iteration++) {
+                Map<Long, double[]> positionsBefore = snapshotPositions();
+                if (shouldUseBimolecularReaction()) {
+                    reactWithTwoMolecules();
+                } else {
+                    reactWithOneMolecule();
+                }
+                updateGlobalBest();
+                writeLogEntries(iteration, positionsBefore);
             }
-            updateGlobalBest();
+        } finally {
+            logger.close();
         }
         return globalBestStructure.clone();
     }
@@ -178,9 +196,11 @@ public class ChemicalReactionOptimization {
                                                   final double[] secondStructure,
                                                   final double secondPotentialEnergy,
                                                   final double surplusEnergy) {
+        Molecule source = population.get(index);
         double firstKineticEnergy = random.nextDouble() * surplusEnergy;
-        population.set(index, new Molecule(firstStructure, firstPotentialEnergy, firstKineticEnergy));
-        population.add(new Molecule(secondStructure, secondPotentialEnergy,
+        population.set(index, new Molecule(source.id(), firstStructure,
+                firstPotentialEnergy, firstKineticEnergy));
+        population.add(new Molecule(nextMoleculeId++, secondStructure, secondPotentialEnergy,
                 surplusEnergy - firstKineticEnergy));
     }
 
@@ -244,8 +264,8 @@ public class ChemicalReactionOptimization {
             int highIndex = Math.max(firstIndex, secondIndex);
             int lowIndex = Math.min(firstIndex, secondIndex);
             population.remove(highIndex);
-            population.set(lowIndex, new Molecule(candidateStructure, candidatePotentialEnergy,
-                    availableEnergy - candidatePotentialEnergy));
+            population.set(lowIndex, new Molecule(first.id(), candidateStructure,
+                    candidatePotentialEnergy, availableEnergy - candidatePotentialEnergy));
         } else {
             first.registerCollision();
             second.registerCollision();
@@ -266,7 +286,7 @@ public class ChemicalReactionOptimization {
             double[] structure = randomStructure();
             double potentialEnergy = evaluate(structure);
             if (Double.isFinite(potentialEnergy)) {
-                return new Molecule(structure, potentialEnergy, kineticEnergy);
+                return new Molecule(nextMoleculeId++, structure, potentialEnergy, kineticEnergy);
             }
         }
         throw new IllegalStateException("No feasible molecule found after "
@@ -297,6 +317,81 @@ public class ChemicalReactionOptimization {
                 globalBestStructure = molecule.bestStructure();
             }
         }
+    }
+
+    private Map<Long, double[]> snapshotPositions() {
+        Map<Long, double[]> positions = new HashMap<>();
+        for (Molecule molecule : population) {
+            positions.put(molecule.id(), molecule.structure());
+        }
+        return positions;
+    }
+
+    private void writeLogEntries(final int iteration,
+                                 final Map<Long, double[]> positionsBefore) {
+        if (!logger.isEnabled()) {
+            return;
+        }
+
+        PopulationStats stats = populationStats();
+        for (Molecule molecule : population) {
+            double[] positionAfter = molecule.structure();
+            double[] positionBefore = positionsBefore.getOrDefault(molecule.id(), positionAfter);
+            logger.log(new AlgorithmLogger.LogEntry(
+                    iteration,
+                    molecule.id(),
+                    positionBefore,
+                    positionAfter,
+                    molecule.bestStructure(),
+                    molecule.bestPotentialEnergy(),
+                    globalBestStructure,
+                    globalBestPotentialEnergy,
+                    stats.averageFitness(),
+                    stats.standardDeviation(),
+                    distanceToOptimum(positionAfter)
+            ));
+        }
+        logger.flush();
+    }
+
+    private PopulationStats populationStats() {
+        double sum = 0.0;
+        int finiteCount = 0;
+        for (Molecule molecule : population) {
+            double fitness = molecule.potentialEnergy();
+            if (Double.isFinite(fitness)) {
+                sum += fitness;
+                finiteCount++;
+            }
+        }
+
+        if (finiteCount == 0) {
+            return new PopulationStats(Double.NaN, Double.NaN);
+        }
+
+        double average = sum / finiteCount;
+        double varianceSum = 0.0;
+        for (Molecule molecule : population) {
+            double fitness = molecule.potentialEnergy();
+            if (Double.isFinite(fitness)) {
+                double diff = fitness - average;
+                varianceSum += diff * diff;
+            }
+        }
+        return new PopulationStats(average, Math.sqrt(varianceSum / finiteCount));
+    }
+
+    private double distanceToOptimum(final double[] position) {
+        if (knownOptimum == null) {
+            return Double.NaN;
+        }
+
+        double sumSquared = 0.0;
+        for (int d = 0; d < position.length; d++) {
+            double diff = position[d] - knownOptimum[d];
+            sumSquared += diff * diff;
+        }
+        return Math.sqrt(sumSquared);
     }
 
     private static double clamp(final double value, final double min, final double max) {
@@ -341,7 +436,10 @@ public class ChemicalReactionOptimization {
             double initialKE,
             double enBuff,
             double stepSize,
-            long seed
+            long seed,
+            boolean loggingEnabled,
+            String logPath,
+            double[] knownOptimum
     ) {
         public CroConfig {
             Objects.requireNonNull(minBounds, "minBounds");
@@ -354,6 +452,8 @@ public class ChemicalReactionOptimization {
             minBounds = minBounds.clone();
             maxBounds = maxBounds.clone();
             validateBoundIntervals(minBounds, maxBounds);
+            logPath = validateLogPath(loggingEnabled, logPath);
+            knownOptimum = validateKnownOptimum(knownOptimum, dimensions);
         }
 
         public double[] minBounds() {
@@ -362,6 +462,10 @@ public class ChemicalReactionOptimization {
 
         public double[] maxBounds() {
             return maxBounds.clone();
+        }
+
+        public double[] knownOptimum() {
+            return knownOptimum == null ? null : knownOptimum.clone();
         }
 
         public static CroConfigBuilder builder() {
@@ -433,6 +537,35 @@ public class ChemicalReactionOptimization {
             }
         }
 
+        private static String validateLogPath(final boolean loggingEnabled,
+                                              final String logPath) {
+            if (!loggingEnabled) {
+                return logPath;
+            }
+            if (logPath == null || logPath.isBlank()) {
+                throw new IllegalArgumentException("logPath must be set when logging is enabled");
+            }
+            return logPath;
+        }
+
+        private static double[] validateKnownOptimum(final double[] knownOptimum,
+                                                     final int dimensions) {
+            if (knownOptimum == null) {
+                return null;
+            }
+            if (knownOptimum.length != dimensions) {
+                throw new IllegalArgumentException("knownOptimum length must match dimensions");
+            }
+
+            double[] copy = knownOptimum.clone();
+            for (double value : copy) {
+                if (!Double.isFinite(value)) {
+                    throw new IllegalArgumentException("knownOptimum values must be finite");
+                }
+            }
+            return copy;
+        }
+
         public static final class CroConfigBuilder {
             private int popSize;
             private int maxIterations;
@@ -447,6 +580,9 @@ public class ChemicalReactionOptimization {
             private double enBuff;
             private double stepSize;
             private long seed;
+            private boolean loggingEnabled;
+            private String logPath = "algorithm_run.log";
+            private double[] knownOptimum;
 
             public CroConfigBuilder popSize(final int popSize) {
                 this.popSize = popSize;
@@ -513,15 +649,31 @@ public class ChemicalReactionOptimization {
                 return this;
             }
 
+            public CroConfigBuilder loggingEnabled(final boolean loggingEnabled) {
+                this.loggingEnabled = loggingEnabled;
+                return this;
+            }
+
+            public CroConfigBuilder logPath(final String logPath) {
+                this.logPath = logPath;
+                return this;
+            }
+
+            public CroConfigBuilder knownOptimum(final double[] knownOptimum) {
+                this.knownOptimum = knownOptimum;
+                return this;
+            }
+
             public CroConfig build() {
                 return new CroConfig(popSize, maxIterations, dimensions, minBounds, maxBounds,
                         kelossRate, moleColl, decThres, synThres, initialKE, enBuff,
-                        stepSize, seed);
+                        stepSize, seed, loggingEnabled, logPath, knownOptimum);
             }
         }
     }
 
     private static final class Molecule {
+        private final long id;
         private double[] structure;
         private double potentialEnergy;
         private double kineticEnergy;
@@ -530,9 +682,11 @@ public class ChemicalReactionOptimization {
         private int collisionCount;
         private int bestCollisionCount;
 
-        Molecule(final double[] structure,
+        Molecule(final long id,
+                 final double[] structure,
                  final double potentialEnergy,
                  final double kineticEnergy) {
+            this.id = id;
             this.structure = structure.clone();
             this.potentialEnergy = potentialEnergy;
             this.kineticEnergy = kineticEnergy;
@@ -560,6 +714,10 @@ public class ChemicalReactionOptimization {
             }
         }
 
+        long id() {
+            return id;
+        }
+
         double[] structure() {
             return structure.clone();
         }
@@ -570,6 +728,10 @@ public class ChemicalReactionOptimization {
 
         double totalEnergy() {
             return potentialEnergy + kineticEnergy;
+        }
+
+        double potentialEnergy() {
+            return potentialEnergy;
         }
 
         boolean hasKineticEnergyAtMost(final double threshold) {
@@ -587,6 +749,9 @@ public class ChemicalReactionOptimization {
         double bestPotentialEnergy() {
             return minPotentialEnergy;
         }
+    }
+
+    private record PopulationStats(double averageFitness, double standardDeviation) {
     }
 
     public static class CROExample {
@@ -621,6 +786,34 @@ public class ChemicalReactionOptimization {
 
         public static void main(String[] args) {
             main();
+        }
+    }
+
+    public static class AckleyLoggingExample {
+        public static void main(String[] args) {
+            double[] min = {AckleyFunction.LOWER_BOUND, AckleyFunction.LOWER_BOUND};
+            double[] max = {AckleyFunction.UPPER_BOUND, AckleyFunction.UPPER_BOUND};
+
+            CroConfig config = CroConfig.builder()
+                    .popSize(20)
+                    .maxIterations(100)
+                    .dimensions(2)
+                    .minBounds(min)
+                    .maxBounds(max)
+                    .kelossRate(0.2)
+                    .moleColl(0.25)
+                    .decThres(20)
+                    .synThres(1.0)
+                    .initialKE(50.0)
+                    .enBuff(50.0)
+                    .stepSize(0.4)
+                    .seed(20260507L)
+                    .loggingEnabled(true)
+                    .logPath("algorithm_run.log")
+                    .knownOptimum(new double[]{0.0, 0.0})
+                    .build();
+
+            new ChemicalReactionOptimization(config, new AckleyFunction()).optimize();
         }
     }
 }

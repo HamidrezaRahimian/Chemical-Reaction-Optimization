@@ -119,3 +119,40 @@ AI tool used: Codex
   Reason: OCP/DIP do not justify additional layers here; the existing `ObjectiveFunction` functional interface is sufficient dependency inversion for the objective function.
 - LSP and ISP have no material violations.
   Reason: there is no inheritance hierarchy, and the only interface has one required method.
+
+## Aufgabe 4 - Logging der Agentendynamik und Konvergenz
+
+AI tool used: Codex
+
+### Logging Concept
+
+- CRO writes a semicolon-separated CSV file with the required header:
+  `iteration;agentId;positionBefore;positionAfter;personalBest;personalBestFitness;globalBest;globalBestFitness;popAvgFitness;popStdDev;distToOptimum`.
+- Each molecule has a stable numeric ID. Existing molecules keep their ID across accepted moves; decomposition keeps the source ID for one product and assigns a new ID to the second product; synthesis keeps the first merged molecule ID.
+- Iteration `0` logs the initialized population before any reaction. Each later iteration logs the population after one CRO reaction, including the molecule's position before and after that iteration.
+- Population statistics are computed from current finite potential energies after the reaction.
+- Distance to optimum is computed from the configured `knownOptimum`; for the Ackley 2D sample this is `{0.0, 0.0}`.
+
+### Files and Classes Added or Changed
+
+- Added `AckleyFunction.java`.
+  Reason: implements the required 2D-capable Ackley test function with `a = 20`, `b = 0.2`, `c = 2 * PI`, bounds `[-32.768, 32.768]`, and global minimum at the origin.
+- Added `AlgorithmLogger.java`.
+  Reason: small plain-Java CSV writer without external logging frameworks.
+- Updated `ChemicalReactionOptimization.java`.
+  Reason: integrated optional logging, stable molecule IDs, population statistics, distance-to-optimum calculation, and `AckleyLoggingExample`.
+- Updated `ChemicalReactionOptimizationTest.java`.
+  Reason: added tests for Ackley minimum, CSV header/columns, and disabled logging behavior.
+- Generated `chemical_reaction_optimization/algorithm_run.log`.
+  Reason: required sample logfile from a full CRO run on Ackley 2D.
+
+### How Logging Is Disabled
+
+- Logging is disabled by default because `CroConfig.builder().loggingEnabled(...)` defaults to `false`.
+- To enable logging, set `.loggingEnabled(true)` and optionally `.logPath("algorithm_run.log")`.
+- The Ackley sample run enables logging explicitly and writes `algorithm_run.log` in the target project directory.
+
+### Confirmation
+
+- `chemical_reaction_optimization/algorithm_run.log` was generated from `ChemicalReactionOptimization.AckleyLoggingExample`.
+- The sample log contains the required CSV columns and records molecule ID, before/after position, personal best, global best, population average fitness, population standard deviation, and distance to `{0.0, 0.0}`.
