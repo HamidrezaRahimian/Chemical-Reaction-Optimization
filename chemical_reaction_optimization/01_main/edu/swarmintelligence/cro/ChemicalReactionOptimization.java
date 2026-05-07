@@ -1,364 +1,305 @@
 package edu.swarmintelligence.cro;
 
-import lombok.*;
-import lombok.extern.slf4j.Slf4j;
-
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Objects;
-import java.util.random.RandomGenerator;
-import java.util.random.RandomGeneratorFactory;
+import java.util.Random;
 
 /**
- * Chemical Reaction Optimization (CRO) Algorithm – strict implementation
- * of Lam & Li (2010). Energy conservation is guaranteed in every reaction.
- * <p>
- * Architecture:
- * <ul>
- *   <li>Java 25 LTS: leverages {@code Math.clamp}, records, compact constructors.</li>
- *   <li>Lombok: eliminates boilerplate; no experimental features.</li>
- *   <li>PRNG: {@code L128X256MixRandom} for reproducible, high‑quality randomness.</li>
- *   <li>Immutability: configuration is a validated record.</li>
- * </ul>
- * </p>
+ * Chemical Reaction Optimization (CRO) for bounded continuous minimization
+ * problems.
  *
- * @see <a href="https://doi.org/10.1109/TEVC.2010.2045390">Lam & Li (2010)</a>
+ * <p>The implementation follows the standard CRO idea of molecules carrying a
+ * structure, potential energy and kinetic energy. Reactions are accepted only
+ * when the available energy can pay for the new potential energy. Lower
+ * objective values are always considered better.</p>
  */
-@Slf4j
 public class ChemicalReactionOptimization {
     private final CroConfig config;
     private final ObjectiveFunction function;
-    private final RandomGenerator random;
-    private final List<Molecule> population;
+    private final Random random;
+
+    private Molecule[] population;
+    private int populationSize;
     private double buffer;
     private double[] globalBestStructure;
-    private double globalBestPE = Double.POSITIVE_INFINITY;
+    private double globalBestPotentialEnergy;
 
-    /**
-     * Creates an optimizer, initializes the molecular population,
-     * and immediately records the initial global best.
-     */
     public ChemicalReactionOptimization(final CroConfig config,
                                         final ObjectiveFunction function) {
-        this.config = Objects.requireNonNull(config);
-        this.function = Objects.requireNonNull(function);
-        this.random = RandomGeneratorFactory.of("L128X256MixRandom")
-                .create(config.seed());
-        this.population = new ArrayList<>(config.popSize());
+        this.config = Objects.requireNonNull(config, "config");
+        this.function = Objects.requireNonNull(function, "function");
+        this.random = new Random(config.seed());
+        this.population = new Molecule[Math.max(4, config.popSize() * 2)];
+        this.populationSize = 0;
         this.buffer = config.enBuff();
+        this.globalBestPotentialEnergy = Double.POSITIVE_INFINITY;
         initializePopulation();
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Phase 0 – Initialisation                                       */
-    /* ---------------------------------------------------------------- */
-
     private void initializePopulation() {
-        final double[] min = config.minBounds();
-        final double[] max = config.maxBounds();
-        final int n = config.dimensions();
-
         for (int i = 0; i < config.popSize(); i++) {
-            var mol = createRandomMolecule(n, min, max, config.initialKE());
-            population.add(mol);
-            if (mol.getPotentialEnergy() < globalBestPE) {
-                globalBestPE = mol.getPotentialEnergy();
-                globalBestStructure = mol.getStructure().clone();
-            }
+            addMolecule(createRandomMolecule(config.initialKE()));
         }
-        log.debug("Population initialized. Start best PE = {}", globalBestPE);
+        updateGlobalBest();
+        if (globalBestStructure == null) {
+            throw new IllegalStateException("No feasible initial molecule found.");
+        }
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Main optimisation loop                                          */
-    /* ---------------------------------------------------------------- */
-
     /**
-     * Executes the CRO iteration loop.
-     *
-     * @return a clone of the global‑best structure after all iterations
+     * Runs the configured number of CRO reactions and returns the best structure
+     * found. The returned array is a defensive copy and can be changed by the
+     * caller without affecting the optimizer state.
      */
     public double[] optimize() {
-        final int n = config.dimensions();
-        final double[] min = config.minBounds();
-        final double[] max = config.maxBounds();
-
-        for (int t = 1; t <= config.maxIterations(); t++) {
-            final boolean bimolecular = random.nextDouble() < config.moleColl();
-
-            if (bimolecular && population.size() >= 2) {
-                int i1 = random.nextInt(population.size());
-                int i2 = random.nextInt(population.size());
-                while (i2 == i1) {
-                    i2 = random.nextInt(population.size());
-                }
-                var m1 = population.get(i1);
-                var m2 = population.get(i2);
-
-                if (m1.getKineticEnergy() <= config.synThres() &&
-                        m2.getKineticEnergy() <= config.synThres()) {
-                    performSynthesis(m1, m2, i1, i2, n);
-                } else {
-                    performInterMolecularCollision(m1, m2, n, min, max);
-                }
+        for (int iteration = 0; iteration < config.maxIterations(); iteration++) {
+            if (populationSize >= 2 && random.nextDouble() < config.moleColl()) {
+                reactWithTwoMolecules();
             } else {
-                int idx = random.nextInt(population.size());
-                var mol = population.get(idx);
-
-                if (mol.getNumHit() >= config.decThres()) {
-                    performDecomposition(mol, idx, n, min, max);
-                } else {
-                    performOnWallCollision(mol, n, min, max);
-                }
+                reactWithOneMolecule();
             }
-
-            ensureMinimumPopulation(n, min, max);
-            updateGlobalBest();   // includes freshly injected molecules
-
-            if (t % 100 == 0 || t == config.maxIterations()) {
-                log.info("Iteration {}/{} : best PE = {}, pop size = {}",
-                        t, config.maxIterations(), globalBestPE, population.size());
-            }
+            updateGlobalBest();
         }
-
-        log.info("Optimisation finished. Final best PE = {}", globalBestPE);
         return globalBestStructure.clone();
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Reaction 1 – On‑Wall Ineffective Collision                     */
-    /* ---------------------------------------------------------------- */
-
-    /**
-     * Energy conservation:
-     * <pre>
-     *   if PE' ≤ PE + KE  →  KE' = (PE + KE − PE')·q
-     *                        buffer ← buffer + (PE + KE − PE')·(1 − q)
-     *                        q ∈ [KELossRate, 1]
-     *   else               →  hits++
-     * </pre>
-     */
-    private void performOnWallCollision(final Molecule mol, final int n,
-                                        final double[] min, final double[] max) {
-        var newStruct = perturbStructure(mol.getStructure(), n, min, max);
-        double newPE = function.evaluate(newStruct);
-
-        if (!Double.isFinite(newPE)) {
-            mol.setNumHit(mol.getNumHit() + 1);
-            return;
-        }
-
-        if (newPE <= mol.getPotentialEnergy() + mol.getKineticEnergy()) {
-            double delta = mol.getPotentialEnergy() + mol.getKineticEnergy() - newPE;
-            double q = config.kelossRate() +
-                    random.nextDouble() * (1.0 - config.kelossRate());
-            updateMoleculeState(mol, newStruct, newPE, delta * q);
-            buffer += delta * (1.0 - q);
+    private void reactWithOneMolecule() {
+        int index = random.nextInt(populationSize);
+        Molecule molecule = population[index];
+        if (molecule.collisionCount - molecule.bestCollisionCount > config.decThres()) {
+            performDecomposition(index);
         } else {
-            mol.setNumHit(mol.getNumHit() + 1);
+            performOnWallCollision(molecule);
         }
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Reaction 2 – Decomposition                                      */
-    /* ---------------------------------------------------------------- */
+    private void reactWithTwoMolecules() {
+        int firstIndex = random.nextInt(populationSize);
+        int secondIndex = random.nextInt(populationSize - 1);
+        if (secondIndex >= firstIndex) {
+            secondIndex++;
+        }
+
+        Molecule first = population[firstIndex];
+        Molecule second = population[secondIndex];
+        boolean synthesisAllowed = populationSize > 2
+                && first.kineticEnergy <= config.synThres()
+                && second.kineticEnergy <= config.synThres();
+
+        if (synthesisAllowed) {
+            performSynthesis(firstIndex, secondIndex);
+        } else {
+            performInterMolecularCollision(first, second);
+        }
+    }
 
     /**
-     * Lam & Li, Algorithm 2.
-     * If PE + KE ≥ PE₁′ + PE₂′ → split surplus randomly.
-     * Else, take deficit from buffer (or fail).
+     * On-wall ineffective collision: one molecule is perturbed. If the new
+     * structure is energetically feasible, part of the surplus energy remains as
+     * kinetic energy and the rest is stored in the central buffer.
      */
-    private void performDecomposition(final Molecule mol, final int idx,
-                                      final int n, final double[] min,
-                                      final double[] max) {
-        var struct1 = perturbStructure(mol.getStructure(), n, min, max);
-        var struct2 = perturbStructure(mol.getStructure(), n, min, max);
+    private void performOnWallCollision(final Molecule molecule) {
+        double[] candidateStructure = perturb(molecule.structure);
+        double candidatePotentialEnergy = evaluate(candidateStructure);
 
-        double pe1 = function.evaluate(struct1);
-        double pe2 = function.evaluate(struct2);
-
-        if (!Double.isFinite(pe1) || !Double.isFinite(pe2)) {
-            mol.setNumHit(mol.getNumHit() + 1);
+        if (!Double.isFinite(candidatePotentialEnergy)) {
+            molecule.registerCollision();
             return;
         }
 
-        final double peBefore = mol.getPotentialEnergy();
-        final double keBefore = mol.getKineticEnergy();
-
-        if (peBefore + keBefore >= pe1 + pe2) {
-            double surplus = peBefore + keBefore - (pe1 + pe2);
-            double ke1 = random.nextDouble() * surplus;
-            population.set(idx, new Molecule(n, struct1, pe1, ke1));
-            population.add(new Molecule(n, struct2, pe2, surplus - ke1));
+        double availableEnergy = molecule.potentialEnergy + molecule.kineticEnergy;
+        if (candidatePotentialEnergy <= availableEnergy) {
+            double surplus = availableEnergy - candidatePotentialEnergy;
+            double kineticRatio = config.kelossRate()
+                    + random.nextDouble() * (1.0 - config.kelossRate());
+            molecule.replaceState(candidateStructure, candidatePotentialEnergy,
+                    surplus * kineticRatio);
+            buffer += surplus * (1.0 - kineticRatio);
         } else {
-            double deficit = pe1 + pe2 - peBefore - keBefore;
+            molecule.registerCollision();
+        }
+    }
+
+    /**
+     * Decomposition: one molecule is split into two perturbed molecules. Energy
+     * missing from the source molecule may be borrowed from the central buffer.
+     */
+    private void performDecomposition(final int index) {
+        Molecule source = population[index];
+        double[] firstStructure = perturb(source.minStructure);
+        double[] secondStructure = perturb(source.structure);
+        double firstPotentialEnergy = evaluate(firstStructure);
+        double secondPotentialEnergy = evaluate(secondStructure);
+
+        if (!Double.isFinite(firstPotentialEnergy) || !Double.isFinite(secondPotentialEnergy)) {
+            source.registerCollision();
+            return;
+        }
+
+        double availableEnergy = source.potentialEnergy + source.kineticEnergy;
+        double requiredPotentialEnergy = firstPotentialEnergy + secondPotentialEnergy;
+        if (requiredPotentialEnergy <= availableEnergy) {
+            double surplus = availableEnergy - requiredPotentialEnergy;
+            double firstKineticEnergy = random.nextDouble() * surplus;
+            population[index] = new Molecule(firstStructure, firstPotentialEnergy, firstKineticEnergy);
+            addMolecule(new Molecule(secondStructure, secondPotentialEnergy,
+                    surplus - firstKineticEnergy));
+        } else {
+            double deficit = requiredPotentialEnergy - availableEnergy;
             if (buffer >= deficit) {
                 buffer -= deficit;
-                population.set(idx, new Molecule(n, struct1, pe1, 0.0));
-                population.add(new Molecule(n, struct2, pe2, 0.0));
+                population[index] = new Molecule(firstStructure, firstPotentialEnergy, 0.0);
+                addMolecule(new Molecule(secondStructure, secondPotentialEnergy, 0.0));
             } else {
-                mol.setNumHit(mol.getNumHit() + 1);
+                source.registerCollision();
             }
         }
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Reaction 3 – Inter‑Molecular Ineffective Collision            */
-    /* ---------------------------------------------------------------- */
-
     /**
-     * Condition: PE₁′+PE₂′ ≤ PE₁+KE₁+PE₂+KE₂.
-     * Surplus is split randomly; buffer unchanged.
+     * Inter-molecular ineffective collision: two molecules are perturbed
+     * independently and accepted when their combined energy can pay for both new
+     * structures.
      */
-    private void performInterMolecularCollision(final Molecule m1,
-                                                final Molecule m2,
-                                                final int n,
-                                                final double[] min,
-                                                final double[] max) {
-        var newStruct1 = perturbStructure(m1.getStructure(), n, min, max);
-        var newStruct2 = perturbStructure(m2.getStructure(), n, min, max);
+    private void performInterMolecularCollision(final Molecule first,
+                                                final Molecule second) {
+        double[] firstStructure = perturb(first.structure);
+        double[] secondStructure = perturb(second.structure);
+        double firstPotentialEnergy = evaluate(firstStructure);
+        double secondPotentialEnergy = evaluate(secondStructure);
 
-        double newPE1 = function.evaluate(newStruct1);
-        double newPE2 = function.evaluate(newStruct2);
-
-        if (!Double.isFinite(newPE1) || !Double.isFinite(newPE2)) {
-            m1.setNumHit(m1.getNumHit() + 1);
-            m2.setNumHit(m2.getNumHit() + 1);
+        if (!Double.isFinite(firstPotentialEnergy) || !Double.isFinite(secondPotentialEnergy)) {
+            first.registerCollision();
+            second.registerCollision();
             return;
         }
 
-        double totalBefore = m1.getPotentialEnergy() + m1.getKineticEnergy()
-                + m2.getPotentialEnergy() + m2.getKineticEnergy();
-        double totalAfter = newPE1 + newPE2;
-
-        if (totalAfter <= totalBefore) {
-            double surplus = totalBefore - totalAfter;
-            double ke1 = random.nextDouble() * surplus;
-            updateMoleculeState(m1, newStruct1, newPE1, ke1);
-            updateMoleculeState(m2, newStruct2, newPE2, surplus - ke1);
+        double availableEnergy = first.potentialEnergy + first.kineticEnergy
+                + second.potentialEnergy + second.kineticEnergy;
+        double requiredPotentialEnergy = firstPotentialEnergy + secondPotentialEnergy;
+        if (requiredPotentialEnergy <= availableEnergy) {
+            double surplus = availableEnergy - requiredPotentialEnergy;
+            double firstKineticEnergy = random.nextDouble() * surplus;
+            first.replaceState(firstStructure, firstPotentialEnergy, firstKineticEnergy);
+            second.replaceState(secondStructure, secondPotentialEnergy,
+                    surplus - firstKineticEnergy);
         } else {
-            m1.setNumHit(m1.getNumHit() + 1);
-            m2.setNumHit(m2.getNumHit() + 1);
+            first.registerCollision();
+            second.registerCollision();
         }
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Reaction 4 – Synthesis                                          */
-    /* ---------------------------------------------------------------- */
-
     /**
-     * Fuses two molecules: {@code ω′ = ω₁ + r ⊙ (ω₂ − ω₁)}}.
-     * Energy condition: PE₁+KE₁+PE₂+KE₂ ≥ PE′.
+     * Synthesis: two low-energy molecules are merged into one molecule. This
+     * reaction is skipped when it would shrink the population below two.
      */
-    private void performSynthesis(final Molecule m1, final Molecule m2,
-                                  final int idx1, final int idx2, final int n) {
-        var newStruct = new double[n];
-        for (int d = 0; d < n; d++) {
-            double r = random.nextDouble();
-            newStruct[d] = Math.clamp(
-                    m1.getStructure()[d] + r * (m2.getStructure()[d] - m1.getStructure()[d]),
+    private void performSynthesis(final int firstIndex, final int secondIndex) {
+        Molecule first = population[firstIndex];
+        Molecule second = population[secondIndex];
+        double[] candidateStructure = new double[config.dimensions()];
+        for (int d = 0; d < candidateStructure.length; d++) {
+            double ratio = random.nextDouble();
+            candidateStructure[d] = clamp(
+                    first.structure[d] + ratio * (second.structure[d] - first.structure[d]),
+                    config.minBounds()[d],
+                    config.maxBounds()[d]);
+        }
+
+        double candidatePotentialEnergy = evaluate(candidateStructure);
+        if (!Double.isFinite(candidatePotentialEnergy)) {
+            first.registerCollision();
+            second.registerCollision();
+            return;
+        }
+
+        double availableEnergy = first.potentialEnergy + first.kineticEnergy
+                + second.potentialEnergy + second.kineticEnergy;
+        if (candidatePotentialEnergy <= availableEnergy) {
+            int highIndex = Math.max(firstIndex, secondIndex);
+            int lowIndex = Math.min(firstIndex, secondIndex);
+            removeMolecule(highIndex);
+            population[lowIndex] = new Molecule(candidateStructure, candidatePotentialEnergy,
+                    availableEnergy - candidatePotentialEnergy);
+        } else {
+            first.registerCollision();
+            second.registerCollision();
+        }
+    }
+
+    private double[] perturb(final double[] structure) {
+        double[] result = new double[config.dimensions()];
+        for (int d = 0; d < result.length; d++) {
+            result[d] = clamp(structure[d] + random.nextGaussian() * config.stepSize(),
                     config.minBounds()[d], config.maxBounds()[d]);
         }
-
-        double newPE = function.evaluate(newStruct);
-        if (!Double.isFinite(newPE)) {
-            m1.setNumHit(m1.getNumHit() + 1);
-            m2.setNumHit(m2.getNumHit() + 1);
-            return;
-        }
-
-        double totalBefore = m1.getPotentialEnergy() + m1.getKineticEnergy()
-                + m2.getPotentialEnergy() + m2.getKineticEnergy();
-        double newKE = totalBefore - newPE;
-
-        if (newKE >= 0) {
-            // Remove the two molecules (larger index first to keep indices valid)
-            int first = Math.max(idx1, idx2);
-            int second = Math.min(idx1, idx2);
-            population.remove(first);
-            population.remove(second);
-            population.add(new Molecule(n, newStruct, newPE, newKE));
-        } else {
-            m1.setNumHit(m1.getNumHit() + 1);
-            m2.setNumHit(m2.getNumHit() + 1);
-        }
+        return result;
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Utilities                                                        */
-    /* ---------------------------------------------------------------- */
-
-    private void updateMoleculeState(final Molecule mol,
-                                     final double[] newStruct,
-                                     final double newPE, final double newKE) {
-        mol.setPotentialEnergy(newPE);
-        mol.setKineticEnergy(newKE);
-        System.arraycopy(newStruct, 0, mol.getStructure(), 0, newStruct.length);
-        mol.setNumHit(0);
-        mol.updateMinRecord();
+    private Molecule createRandomMolecule(final double kineticEnergy) {
+        final int maxAttempts = 1000;
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            double[] structure = new double[config.dimensions()];
+            for (int d = 0; d < structure.length; d++) {
+                double min = config.minBounds()[d];
+                double max = config.maxBounds()[d];
+                structure[d] = min + random.nextDouble() * (max - min);
+            }
+            double potentialEnergy = evaluate(structure);
+            if (Double.isFinite(potentialEnergy)) {
+                return new Molecule(structure, potentialEnergy, kineticEnergy);
+            }
+        }
+        throw new IllegalStateException("No feasible molecule found after 1000 attempts.");
     }
 
-    private double[] perturbStructure(final double[] structure, final int n,
-                                      final double[] min, final double[] max) {
-        var newStructure = new double[n];
-        double step = config.stepSize();
-        Arrays.setAll(newStructure, d ->
-                Math.clamp(structure[d] + random.nextGaussian() * step,
-                        min[d], max[d]));
-        return newStructure;
+    private double evaluate(final double[] structure) {
+        return function.evaluate(structure.clone());
     }
 
     private void updateGlobalBest() {
-        for (var mol : population) {
-            if (mol.getPotentialEnergy() < globalBestPE) {
-                globalBestPE = mol.getPotentialEnergy();
-                globalBestStructure = mol.getStructure().clone();
+        for (int i = 0; i < populationSize; i++) {
+            Molecule molecule = population[i];
+            if (molecule.minPotentialEnergy < globalBestPotentialEnergy) {
+                globalBestPotentialEnergy = molecule.minPotentialEnergy;
+                globalBestStructure = molecule.minStructure.clone();
             }
         }
     }
 
-    private void ensureMinimumPopulation(final int n, final double[] min,
-                                         final double[] max) {
-        while (population.size() < 2) {
-            population.add(createRandomMolecule(n, min, max, config.initialKE()));
+    private void addMolecule(final Molecule molecule) {
+        if (populationSize == population.length) {
+            population = Arrays.copyOf(population, population.length * 2);
         }
+        population[populationSize++] = molecule;
     }
 
-    private Molecule createRandomMolecule(final int n,
-                                          final double[] min,
-                                          final double[] max,
-                                          final double initialKE) {
-        final int MAX_RETRIES = 1000;
-        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-            var x = new double[n];
-            for (int d = 0; d < n; d++) {
-                x[d] = min[d] + random.nextDouble() * (max[d] - min[d]);
-            }
-            double pe = function.evaluate(x);
-            if (Double.isFinite(pe)) {
-                return new Molecule(n, x, pe, initialKE);
-            }
+    private void removeMolecule(final int index) {
+        int moved = populationSize - index - 1;
+        if (moved > 0) {
+            System.arraycopy(population, index + 1, population, index, moved);
         }
-        throw new IllegalStateException(
-                "No feasible molecule found after " + MAX_RETRIES + " attempts.");
+        population[--populationSize] = null;
+    }
+
+    private static double clamp(final double value, final double min, final double max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     public double getTotalSystemEnergy() {
         double total = buffer;
-        for (var mol : population) {
-            total += mol.getPotentialEnergy() + mol.getKineticEnergy();
+        for (int i = 0; i < populationSize; i++) {
+            total += population[i].potentialEnergy + population[i].kineticEnergy;
         }
         return total;
     }
 
     public double getBestPE() {
-        return globalBestPE;
+        return globalBestPotentialEnergy;
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Embedded types                                                   */
-    /* ---------------------------------------------------------------- */
+    int getPopulationSize() {
+        return populationSize;
+    }
 
     @FunctionalInterface
     public interface ObjectiveFunction {
@@ -366,9 +307,9 @@ public class ChemicalReactionOptimization {
     }
 
     /**
-     * Immutable CRO configuration.  All arrays are defensively copied.
+     * Configuration for bounded CRO minimization. Array parameters are copied
+     * defensively on construction and when accessed.
      */
-    @Builder
     public record CroConfig(
             int popSize,
             int maxIterations,
@@ -387,107 +328,226 @@ public class ChemicalReactionOptimization {
         public CroConfig {
             Objects.requireNonNull(minBounds, "minBounds");
             Objects.requireNonNull(maxBounds, "maxBounds");
-            if (popSize < 2) throw new IllegalArgumentException(
-                    "PopSize must be ≥ 2");
-            if (maxIterations <= 0) throw new IllegalArgumentException(
-                    "MaxIterations > 0");
-            if (dimensions <= 0) throw new IllegalArgumentException(
-                    "Dimensions > 0");
-            if (minBounds.length != dimensions ||
-                    maxBounds.length != dimensions) throw new IllegalArgumentException(
-                    "Bounds length must match dimensions");
-            if (kelossRate < 0.0 || kelossRate > 1.0) throw new IllegalArgumentException(
-                    "KELossRate in [0,1]");
-            if (moleColl < 0.0 || moleColl > 1.0) throw new IllegalArgumentException(
-                    "MoleColl in [0,1]");
-            if (decThres <= 0) throw new IllegalArgumentException(
-                    "DecThres > 0");
-            if (synThres < 0.0) throw new IllegalArgumentException(
-                    "SynThres ≥ 0");
-            if (initialKE <= 0) throw new IllegalArgumentException(
-                    "InitialKE > 0");
-            if (enBuff < 0.0) throw new IllegalArgumentException(
-                    "EnBuff ≥ 0");
-            if (stepSize <= 0) throw new IllegalArgumentException(
-                    "StepSize > 0");
+            if (popSize < 2) {
+                throw new IllegalArgumentException("PopSize must be >= 2");
+            }
+            if (maxIterations <= 0) {
+                throw new IllegalArgumentException("MaxIterations must be > 0");
+            }
+            if (dimensions <= 0) {
+                throw new IllegalArgumentException("Dimensions must be > 0");
+            }
+            if (minBounds.length != dimensions || maxBounds.length != dimensions) {
+                throw new IllegalArgumentException("Bounds length must match dimensions");
+            }
+            validateFiniteProbability(kelossRate, "kelossRate");
+            validateFiniteProbability(moleColl, "moleColl");
+            if (decThres <= 0) {
+                throw new IllegalArgumentException("decThres must be > 0");
+            }
+            if (!Double.isFinite(synThres) || synThres < 0.0) {
+                throw new IllegalArgumentException("synThres must be finite and >= 0");
+            }
+            if (!Double.isFinite(initialKE) || initialKE <= 0.0) {
+                throw new IllegalArgumentException("initialKE must be finite and > 0");
+            }
+            if (!Double.isFinite(enBuff) || enBuff < 0.0) {
+                throw new IllegalArgumentException("enBuff must be finite and >= 0");
+            }
+            if (!Double.isFinite(stepSize) || stepSize <= 0.0) {
+                throw new IllegalArgumentException("stepSize must be finite and > 0");
+            }
+
             minBounds = minBounds.clone();
             maxBounds = maxBounds.clone();
-        }
-    }
-
-    /**
-     * A molecule with its structure and energy state.
-     * Equals/HashCode ignore the large double[] fields to avoid performance hits.
-     */
-    @Getter
-    @Setter
-    @EqualsAndHashCode(exclude = {"structure", "minStructure"})
-    @ToString(exclude = {"structure", "minStructure"})
-    private static class Molecule {
-        private final double[] structure;
-        private final double[] minStructure;
-        private double potentialEnergy;
-        private double kineticEnergy;
-        private double minPE;
-        private int numHit;
-
-        Molecule(final int dimensions, final double[] structure,
-                 final double potentialEnergy, final double kineticEnergy) {
-            this.structure = structure.clone();
-            this.potentialEnergy = potentialEnergy;
-            this.kineticEnergy = kineticEnergy;
-            this.minStructure = structure.clone();
-            this.minPE = potentialEnergy;
-            this.numHit = 0;
+            for (int d = 0; d < dimensions; d++) {
+                if (!Double.isFinite(minBounds[d]) || !Double.isFinite(maxBounds[d])) {
+                    throw new IllegalArgumentException("Bounds must be finite");
+                }
+                if (minBounds[d] >= maxBounds[d]) {
+                    throw new IllegalArgumentException("Each min bound must be smaller than max bound");
+                }
+            }
         }
 
-        void updateMinRecord() {
-            if (potentialEnergy < minPE) {
-                minPE = potentialEnergy;
-                System.arraycopy(structure, 0, minStructure, 0, structure.length);
+        public double[] minBounds() {
+            return minBounds.clone();
+        }
+
+        public double[] maxBounds() {
+            return maxBounds.clone();
+        }
+
+        public static CroConfigBuilder builder() {
+            return new CroConfigBuilder();
+        }
+
+        private static void validateFiniteProbability(final double value, final String name) {
+            if (!Double.isFinite(value) || value < 0.0 || value > 1.0) {
+                throw new IllegalArgumentException(name + " must be finite and in [0, 1]");
+            }
+        }
+
+        public static final class CroConfigBuilder {
+            private int popSize;
+            private int maxIterations;
+            private int dimensions;
+            private double[] minBounds;
+            private double[] maxBounds;
+            private double kelossRate;
+            private double moleColl;
+            private int decThres;
+            private double synThres;
+            private double initialKE;
+            private double enBuff;
+            private double stepSize;
+            private long seed;
+
+            public CroConfigBuilder popSize(final int popSize) {
+                this.popSize = popSize;
+                return this;
+            }
+
+            public CroConfigBuilder maxIterations(final int maxIterations) {
+                this.maxIterations = maxIterations;
+                return this;
+            }
+
+            public CroConfigBuilder dimensions(final int dimensions) {
+                this.dimensions = dimensions;
+                return this;
+            }
+
+            public CroConfigBuilder minBounds(final double[] minBounds) {
+                this.minBounds = minBounds;
+                return this;
+            }
+
+            public CroConfigBuilder maxBounds(final double[] maxBounds) {
+                this.maxBounds = maxBounds;
+                return this;
+            }
+
+            public CroConfigBuilder kelossRate(final double kelossRate) {
+                this.kelossRate = kelossRate;
+                return this;
+            }
+
+            public CroConfigBuilder moleColl(final double moleColl) {
+                this.moleColl = moleColl;
+                return this;
+            }
+
+            public CroConfigBuilder decThres(final int decThres) {
+                this.decThres = decThres;
+                return this;
+            }
+
+            public CroConfigBuilder synThres(final double synThres) {
+                this.synThres = synThres;
+                return this;
+            }
+
+            public CroConfigBuilder initialKE(final double initialKE) {
+                this.initialKE = initialKE;
+                return this;
+            }
+
+            public CroConfigBuilder enBuff(final double enBuff) {
+                this.enBuff = enBuff;
+                return this;
+            }
+
+            public CroConfigBuilder stepSize(final double stepSize) {
+                this.stepSize = stepSize;
+                return this;
+            }
+
+            public CroConfigBuilder seed(final long seed) {
+                this.seed = seed;
+                return this;
+            }
+
+            public CroConfig build() {
+                return new CroConfig(popSize, maxIterations, dimensions, minBounds, maxBounds,
+                        kelossRate, moleColl, decThres, synThres, initialKE, enBuff,
+                        stepSize, seed);
             }
         }
     }
 
-    /* ---------------------------------------------------------------- */
-    /*  Quick demonstration                                              */
-    /* ---------------------------------------------------------------- */
+    private static final class Molecule {
+        private double[] structure;
+        private double potentialEnergy;
+        private double kineticEnergy;
+        private double[] minStructure;
+        private double minPotentialEnergy;
+        private int collisionCount;
+        private int bestCollisionCount;
 
-    @Slf4j
+        Molecule(final double[] structure,
+                 final double potentialEnergy,
+                 final double kineticEnergy) {
+            this.structure = structure.clone();
+            this.potentialEnergy = potentialEnergy;
+            this.kineticEnergy = kineticEnergy;
+            this.minStructure = structure.clone();
+            this.minPotentialEnergy = potentialEnergy;
+            this.collisionCount = 0;
+            this.bestCollisionCount = 0;
+        }
+
+        void replaceState(final double[] newStructure,
+                          final double newPotentialEnergy,
+                          final double newKineticEnergy) {
+            structure = newStructure.clone();
+            potentialEnergy = newPotentialEnergy;
+            kineticEnergy = Math.max(0.0, newKineticEnergy);
+            registerCollision();
+        }
+
+        void registerCollision() {
+            collisionCount++;
+            if (potentialEnergy < minPotentialEnergy) {
+                minPotentialEnergy = potentialEnergy;
+                minStructure = structure.clone();
+                bestCollisionCount = collisionCount;
+            }
+        }
+    }
+
     public static class CROExample {
         public static void main() {
-            log.info("CRO Example – Sphere function minimisation");
-
-            ObjectiveFunction sphere = x ->
-                    Arrays.stream(x).map(v -> v * v).sum();
-
-            int dim = 10;
-            var min = new double[dim];
-            var max = new double[dim];
+            ObjectiveFunction sphere = x -> Arrays.stream(x).map(v -> v * v).sum();
+            int dimensions = 10;
+            double[] min = new double[dimensions];
+            double[] max = new double[dimensions];
             Arrays.fill(min, -5.12);
             Arrays.fill(max, 5.12);
 
-            var config = CroConfig.builder()
-                    .popSize(10)
-                    .maxIterations(1000)
-                    .dimensions(dim)
+            CroConfig config = CroConfig.builder()
+                    .popSize(30)
+                    .maxIterations(2000)
+                    .dimensions(dimensions)
                     .minBounds(min)
                     .maxBounds(max)
                     .kelossRate(0.2)
                     .moleColl(0.2)
-                    .decThres(10)
+                    .decThres(20)
                     .synThres(1.0)
-                    .initialKE(1000.0)
-                    .enBuff(1000.0)
+                    .initialKE(100.0)
+                    .enBuff(100.0)
                     .stepSize(0.1)
                     .seed(12345L)
                     .build();
 
-            var cro = new ChemicalReactionOptimization(config, sphere);
-            double[] best = cro.optimize();
+            ChemicalReactionOptimization cro =
+                    new ChemicalReactionOptimization(config, sphere);
+            cro.optimize();
+        }
 
-            log.info("Best solution: {}", Arrays.toString(best));
-            log.info("Best PE: {}", cro.getBestPE());
+        public static void main(String[] args) {
+            main();
         }
     }
 }
