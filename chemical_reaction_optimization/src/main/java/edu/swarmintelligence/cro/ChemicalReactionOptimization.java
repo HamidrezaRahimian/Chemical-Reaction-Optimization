@@ -64,6 +64,16 @@ public class ChemicalReactionOptimization {
     }
 
     /**
+     * Runs the default Ackley logging scenario when this class is launched
+     * directly from an IDE or the command line.
+     *
+     * @param args ignored command-line arguments
+     */
+    public static void main(final String[] args) {
+        AckleyLoggingExample.main(args);
+    }
+
+    /**
      * Samples the initial molecule population uniformly inside the configured
      * bounds and records the initial global best. Iteration {@code 0} is logged
      * here because no reaction has happened yet, so before/after positions are
