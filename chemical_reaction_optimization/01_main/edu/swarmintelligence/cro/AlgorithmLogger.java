@@ -92,13 +92,13 @@ final class AlgorithmLogger implements AutoCloseable {
         }
     }
 
-    @Override
     /**
      * Closes the underlying file writer. The disabled logger and repeated close
      * calls are no-ops.
      *
      * @throws UncheckedIOException if closing the enabled writer fails
      */
+    @Override
     public void close() {
         if (!isEnabled()) {
             return;
